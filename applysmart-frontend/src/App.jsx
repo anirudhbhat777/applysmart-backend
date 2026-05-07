@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-const API_URL = "http://localhost:3001";
+const API_URL = "https://applysmart-backend-oihx.onrender.com";
 function App() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
