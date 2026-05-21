@@ -39,7 +39,7 @@ app.get("/me", authMiddleware, (req, res) => {
 });
 // Test route
 app.get("/", (req, res) => {
-  res.send("API working 🚀");
+  res.send("API working ");
 });
 
 // Signup route
@@ -111,7 +111,7 @@ app.post("/login", async (req, res) => {
       return res.status(400).json({ error: "Invalid password" });
     }
 
-    // ✅ create token AFTER user is verified
+    //  create token AFTER user is verified
     const token = jwt.sign(
       { userId: user.id },
       "secret123",
