@@ -3,10 +3,25 @@ const bcrypt = require("bcrypt");
 const cors = require("cors");
 const pool = require("./db");
 const jwt = require("jsonwebtoken");
+const multer = require("multer");
+const pdfParse = require("pdf-parse");
 const app = express();
 require("dotenv").config();
+if (!process.env.JWT_SECRET) {
+  throw new Error("JWT_SECRET environment variable is required");
+}
+const allowedOrigins = [
+  "http://localhost:5173",
+  "https://applysmart-frontend.vercel.app",
+];
+
 app.use(cors({
-  origin: "*"
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error("Not allowed by CORS"));
+  },
 }));
 app.use(express.json());
 const { GoogleGenerativeAI } = require("@google/generative-ai");
@@ -22,7 +37,7 @@ function authMiddleware(req, res, next) {
   const token = authHeader.split(" ")[1];
 
   try {
-    const decoded = jwt.verify(token, "secret123");
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
     req.userId = decoded.userId; // attach to request
 
@@ -31,6 +46,51 @@ function authMiddleware(req, res, next) {
     return res.status(401).json({ error: "Invalid token" });
   }
 }
+const uploadPdf = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024, files: 1 },
+  fileFilter: (req, file, callback) => {
+    if (file.mimetype !== "application/pdf") {
+      return callback(new Error("Only PDF files are allowed"));
+    }
+    callback(null, true);
+  },
+});
+
+app.post("/upload-resume", authMiddleware, (req, res) => {
+  uploadPdf.single("file")(req, res, async (err) => {
+    if (err instanceof multer.MulterError && err.code === "LIMIT_FILE_SIZE") {
+      return res.status(400).json({ error: "PDF file must be 5 MB or smaller" });
+    }
+    if (err instanceof multer.MulterError && err.code === "LIMIT_UNEXPECTED_FILE") {
+      return res.status(400).json({ error: "Upload a single PDF file using the 'file' field" });
+    }
+    if (err) {
+      return res.status(400).json({ error: err.message });
+    }
+    if (!req.file) {
+      return res.status(400).json({ error: "PDF file is required in the 'file' field" });
+    }
+
+    const isPdf = req.file.buffer.subarray(0, 5).toString() === "%PDF-";
+    if (!isPdf) {
+      return res.status(400).json({ error: "Invalid file type: upload a valid PDF" });
+    }
+
+    try {
+      const parsed = await pdfParse(req.file.buffer);
+      const text = parsed.text.trim();
+      if (!text) {
+        return res.status(400).json({
+          error: "No extractable text found. Scanned or image-only PDFs are not supported.",
+        });
+      }
+      return res.json({ text });
+    } catch (parseError) {
+      return res.status(400).json({ error: "Could not parse the uploaded PDF" });
+    }
+  });
+});
 app.get("/me", authMiddleware, (req, res) => {
   res.json({
     message: "Protected route working",
@@ -114,7 +174,7 @@ app.post("/login", async (req, res) => {
     //  create token AFTER user is verified
     const token = jwt.sign(
       { userId: user.id },
-      "secret123",
+      process.env.JWT_SECRET,
       { expiresIn: "1h" }
     );
 
