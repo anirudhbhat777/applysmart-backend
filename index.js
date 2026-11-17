@@ -5,6 +5,7 @@ const pool = require("./db");
 const jwt = require("jsonwebtoken");
 const multer = require("multer");
 const pdfParse = require("pdf-parse");
+const { z } = require("zod");
 const app = express();
 require("dotenv").config();
 if (!process.env.JWT_SECRET) {
@@ -27,6 +28,17 @@ app.use(express.json());
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const optimizationSchema = z.object({
+  matchScore: z.number().int().min(0).max(100),
+  matchedSkills: z.array(z.string()),
+  missingSkills: z.array(z.string()),
+  bullets: z.array(z.object({
+    original: z.string(),
+    rewritten: z.string(),
+    reason: z.string(),
+  }).strict()).max(8),
+}).strict();
+
 function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization;
 
@@ -208,45 +220,62 @@ app.get("/resume", authMiddleware, async (req, res) => {
   }
 });
 app.post("/optimize", authMiddleware, async (req, res) => {
-  const { content } = req.body;
+  const { resumeText, jobDescription } = req.body || {};
+  const maxResumeLength = 20000;
+  const maxJobDescriptionLength = 30000;
 
-  if (!content) {
-    return res.status(400).json({ error: "Content required" });
+  if (typeof resumeText !== "string" || !resumeText.trim()) {
+    return res.status(400).json({ error: "resumeText must be a non-empty string" });
+  }
+  if (resumeText.length > maxResumeLength) {
+    return res.status(400).json({ error: `resumeText must be ${maxResumeLength} characters or fewer` });
+  }
+  if (typeof jobDescription !== "string" || !jobDescription.trim()) {
+    return res.status(400).json({ error: "jobDescription must be a non-empty string" });
+  }
+  if (jobDescription.length > maxJobDescriptionLength) {
+    return res.status(400).json({ error: `jobDescription must be ${maxJobDescriptionLength} characters or fewer` });
   }
 
-  try {
-    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+  const model = genAI.getGenerativeModel({
+    model: "gemini-2.5-flash",
+    generationConfig: { responseMimeType: "application/json" },
+  });
+  const prompt = `Compare the candidate resume with the target job description and return JSON only, matching this exact shape:
+{"matchScore":75,"matchedSkills":["React","Node.js"],"missingSkills":["Docker"],"bullets":[{"original":"Original resume bullet","rewritten":"Improved resume bullet","reason":"Explains why this version is stronger."}]}
 
-    const result = await model.generateContent(`
-You are a professional resume writer.
-Give the ats score as well as rewrite the following resume content into strong, concise bullet points that are clear, professional, and impact-focused. Use action verbs and keep each bullet short (1 line). Max 5 bullet points.
-Rules:
-- Output ONLY bullet points
-- No explanations, no headings, no extra text
-- No markdown symbols like **, ---, or >
-- Each bullet must be clear, professional, and impact-focused
-- Use action verbs (Built, Developed, Designed, Implemented)
-- Max 5 bullet points
-- Keep each bullet short (1 line)
+Accuracy rules:
+- Never invent numbers, percentages, metrics, tools, achievements, or experience.
+- Preserve the truth and scope of the original resume.
+- If a metric would improve a bullet but is not provided, use a placeholder such as [X%] or [N users].
+- Make rewritten bullets relevant to the job description while retaining the original facts.
+- Return up to 8 bullets, each corresponding to an existing resume bullet. Do not invent original bullets.
+- Keep each reason to one short sentence.
+- matchScore must be an integer from 0 to 100 based on the evidence in the resume.
+- matchedSkills and missingSkills must reflect skills explicitly supported or required by the supplied text.
 
-Resume:
-${content}
-`);
-    const improved = result.response.text();
+Resume:\n${resumeText}\n\nJob description:\n${jobDescription}`;
 
-    await pool.query(
-      "INSERT INTO resumes (content, user_id) VALUES ($1, $2)",
-      [improved, req.userId]
-    );
-const bullets = improved
-  .split("\n")
-  .map(line => line.trim())
-  .filter(line => line.length > 0);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const result = await model.generateContent(prompt, { timeout: 30000 });
+      const parsed = JSON.parse(result.response.text());
+      const validated = optimizationSchema.safeParse(parsed);
+      if (!validated.success) {
+        throw new Error("Gemini response did not match the required schema");
+      }
 
-res.json({ bullets });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "AI error" });
+      await pool.query(
+        "INSERT INTO resumes (content, user_id) VALUES ($1, $2)",
+        [JSON.stringify(validated.data), req.userId]
+      );
+      return res.json(validated.data);
+    } catch (err) {
+      if (attempt === 1) {
+        console.error("Resume optimization failed after retry:", err.message);
+        return res.status(502).json({ error: "AI could not produce a valid resume analysis. Please try again." });
+      }
+    }
   }
 });
 app.post("/resume", authMiddleware, async (req, res) => {
