@@ -6,6 +6,7 @@ const jwt = require("jsonwebtoken");
 const multer = require("multer");
 const pdfParse = require("pdf-parse");
 const { z } = require("zod");
+const { detectFabricatedNumbers } = require("./numberDetection");
 const app = express();
 require("dotenv").config();
 if (!process.env.JWT_SECRET) {
@@ -265,11 +266,16 @@ Resume:\n${resumeText}\n\nJob description:\n${jobDescription}`;
         throw new Error("Gemini response did not match the required schema");
       }
 
+      const safeAnalysis = {
+        ...validated.data,
+        bullets: validated.data.bullets.map(detectFabricatedNumbers),
+      };
+
       await pool.query(
         "INSERT INTO resumes (content, user_id) VALUES ($1, $2)",
-        [JSON.stringify(validated.data), req.userId]
+        [JSON.stringify(safeAnalysis), req.userId]
       );
-      return res.json(validated.data);
+      return res.json(safeAnalysis);
     } catch (err) {
       if (attempt === 1) {
         console.error("Resume optimization failed after retry:", err.message);
